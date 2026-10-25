@@ -1,0 +1,471 @@
+"""P2 — register decode tests.
+
+Fixtures are the literal `+ok=` frames captured from the device:
+- the 6 telemetry blocks in local-deye-cloud/captures/app_readmap.txt, and
+- one live 0x0210 count-14 read (to reach inverter_temp at 0x021D).
+
+Each frame is parsed by the real protocol.parse_read, so these assert the
+decode offsets/scaling against genuine device bytes — not against re-derived
+assumptions. Every expected value was confirmed by a same-second BLE-vs-HA
+comparison (local-deye-cloud/docs/stats-register-decode.md).
+"""
+from datetime import datetime
+
+import pytest
+
+from custom_components.deye_ble import protocol as p
+from custom_components.deye_ble import registers as r
+
+
+# --- Captured frames (block_start -> raw +ok= response) ---------------------
+
+FRAMES: dict[int, str] = {
+    0x00D2: "+ok=01030816441252025604330936",  # BMS: chg V 57.00, dis V 46.90, limits 598/1075
+    0x0202: "+ok=01031C00040068349B000031A70000000000043BEC000010B00000006C2DC084C7",
+    0x0210: "+ok=01031C0000005100000000000000000C890000000000000000000004E205E665A3",
+    0x024A: "+ok=01030C046A14A6002E0000FED8000D9095",
+    0x0256: "+ok=01031409700940094F000000000000FFA6FF000130FFD65280",
+    0x0270: "+ok=0103200130FFD600000973093B094300A000A000BE01B201A701EE0547054713830000E9C0",
+    0x0280: "+ok=010320015800A7031E051D097609400942000000000000015800A7031E051D051D1383E5C8",
+    0x02A0: "+ok=01032006F70000000000000A330044001F00000000000000000000000000000000FFFFA4B0",
+}
+
+
+def _words_by_reg(*block_starts: int) -> dict[int, list[int]]:
+    """Parse the named captured frames into a {start: words} poll snapshot."""
+    starts = block_starts or tuple(FRAMES)
+    return {start: p.parse_read(FRAMES[start]) for start in starts}
+
+
+@pytest.fixture
+def poll() -> dict[str, float | int | str]:
+    """A full decode of all captured telemetry frames."""
+    return r.decode(_words_by_reg())
+
+
+# --- Per-block decode against real bytes ------------------------------------
+
+def test_energy_totals_block_0x0202(poll):
+    assert poll["total_battery_charge"] == 1346.7
+    assert poll["total_battery_discharge"] == 1271.1
+    assert poll["total_grid_import"] == 1534.0
+    assert poll["total_grid_export"] == 427.2
+    assert poll["total_consumption"] == 1171.2
+    assert poll["daily_grid_import"] == 0.0
+    assert poll["daily_grid_export"] == 0.4
+
+
+def test_solar_and_temps_block_0x0210(poll):
+    assert poll["daily_solar"] == 8.1
+    assert poll["total_solar"] == 320.9
+    assert poll["inverter_temp"] == 51.0  # (1510 - 1000) / 10
+
+
+def test_battery_block_0x024A(poll):
+    assert poll["battery_temp"] == 13.0      # (1130 - 1000) / 10
+    assert poll["battery_voltage"] == 52.86  # 5286 * 0.01
+    assert poll["battery_soc"] == 46
+    assert poll["battery_power"] == -296     # 0xFED8 signed
+
+
+def test_grid_power_signed_block_0x0256(poll):
+    assert poll["grid_power"] == -42  # 0xFFD6 signed, register 0x025F
+
+
+def test_inverter_phases_block_0x0270(poll):
+    assert poll["inverter_power_l1"] == 434
+    assert poll["inverter_power_l2"] == 423
+    assert poll["inverter_power_l3"] == 494
+
+
+def test_inverter_phase_sum_matches_total_register(poll):
+    # Register 0x027C holds the inverter total (1351 W) — a built-in cross check.
+    total = p.parse_read(FRAMES[0x0270])[0x027C - 0x0270]
+    assert poll["inverter_power_l1"] + poll["inverter_power_l2"] + poll["inverter_power_l3"] == total
+
+
+def test_load_block_0x0280(poll):
+    assert poll["house_load"] == 1309  # 0x0283
+    assert poll["ups_power"] == 1309   # 0x028D (mirrors load while grid-connected)
+
+
+def test_solar_power_block_0x02A0(poll):
+    assert poll["solar_power"] == 1783  # 0x02A0
+    assert poll["pv1_power"] == 1783    # 0x02A0, same register as solar_power
+
+
+def test_pv1_pv2_registers_block_0x02A0(poll):
+    assert poll["pv2_power"] == 0       # 0x02A1
+    assert poll["pv1_voltage"] == pytest.approx(261.1)  # 0x02A4
+    assert poll["pv1_current"] == pytest.approx(6.8)    # 0x02A5
+    assert poll["pv2_voltage"] == pytest.approx(3.1)    # 0x02A6
+    assert poll["pv2_current"] == pytest.approx(0.0)     # 0x02A7
+    # V x A must reproduce the PV power register within rounding.
+    assert poll["pv1_voltage"] * poll["pv1_current"] == pytest.approx(poll["solar_power"], rel=0.01)
+
+
+# --- Full poll coverage ------------------------------------------------------
+
+# The 21 telemetry/control values decode() must produce. daily_consumption is
+# derived in P4 from total_consumption (the 22nd sensor key); work_mode is the
+# separate 23rd integration value, decoded below as an enum label.
+EXPECTED_KEYS = {
+    "solar_power", "house_load", "grid_power", "battery_power", "ups_power",
+    "battery_soc", "battery_voltage", "battery_temp", "inverter_temp",
+    "daily_solar", "total_solar", "total_grid_import", "total_grid_export",
+    "total_battery_charge", "total_battery_discharge", "max_sell_power",
+    "inverter_power_l1", "inverter_power_l2", "inverter_power_l3",
+    "pv1_power", "pv2_power", "pv1_voltage", "pv1_current",
+    "pv2_voltage", "pv2_current",
+}
+
+
+def test_full_poll_produces_all_telemetry_keys(poll):
+    control = r.decode({0x008E: [0, 100]})  # work_mode=0, max_sell=100
+    keys = set(poll) | set(control)
+    assert EXPECTED_KEYS <= keys
+
+
+def test_daily_consumption_is_not_decoded(poll):
+    # No register exists for it; it is derived later. Must NOT be fabricated.
+    assert "daily_consumption" not in poll
+
+
+def test_partial_poll_omits_missing_keys():
+    # Only the battery block present -> only its keys, nothing else invented.
+    data = r.decode(_words_by_reg(0x024A))
+    assert "battery_soc" in data
+    assert "solar_power" not in data
+    assert "grid_power" not in data
+
+
+# --- Control registers -------------------------------------------------------
+
+def test_max_sell_power_from_real_single_register_frame():
+    # 0x008F = 100 W, captured write read-back frame.
+    data = r.decode({0x008F: p.parse_read("+ok=0103020064B9AF")})
+    assert data["max_sell_power"] == 100
+
+
+def test_zero_export_power_decode_signed():
+    # 0x0068 = zero-export power (W), signed. 20 W positive, -30 as 0xFFE2,
+    # -1000 as 0xFC18 — the negatives were live-probed as accepted by the inverter.
+    assert r.decode({0x0068: [20]})["zero_export_power"] == 20
+    assert r.decode({0x0068: [0xFFE2]})["zero_export_power"] == -30
+    assert r.decode({0x0068: [0xFC18]})["zero_export_power"] == -1000
+    assert r.REG_ZERO_EXPORT_POWER == 0x0068
+
+
+def test_zero_export_power_block_is_polled():
+    # 0x0068 must fall inside a CONTROL_BLOCKS read so native_value tracks the device.
+    assert any(
+        start <= 0x0068 < start + count for start, count in r.CONTROL_BLOCKS
+    )
+
+
+def test_max_charge_discharge_current_decode():
+    # Registers 0x006C/0x006D, confirmed by a live MITM capture of the Deye app
+    # writing these values (raw = amps, no scaling). Guards the reverse-engineered
+    # addresses: a wrong address here would write garbage to a live inverter.
+    data = r.decode({0x006C: [210, 200]})  # 0x006C charge, 0x006D discharge
+    assert data["max_charge_current"] == 210
+    assert data["max_discharge_current"] == 200
+    assert r.REG_MAX_CHARGE_CURRENT == 0x006C
+    assert r.REG_MAX_DISCHARGE_CURRENT == 0x006D
+
+
+def test_max_charge_current_block_is_polled():
+    # The current setpoints must be in a CONTROL_BLOCKS read so native_value reflects
+    # the live value; 0x006C..0x006D must fall inside one polled block.
+    assert any(
+        start <= 0x006C and 0x006D < start + count
+        for start, count in r.CONTROL_BLOCKS
+    )
+
+
+def test_battery_soc_threshold_decode():
+    # 0x0073 shutdown, 0x0074 restart, 0x0075 low — confirmed by a live MITM capture
+    # of the Deye app (shutdown 4, restart 6, low 5).
+    data = r.decode({0x0073: [4, 6, 5]})  # 0x0073..0x0075
+    assert data["batt_shutdown_soc"] == 4
+    assert data["batt_restart_soc"] == 6
+    assert data["batt_low_soc"] == 5
+    assert r.REG_BATT_SHUTDOWN_SOC == 0x0073
+    assert r.REG_BATT_RESTART_SOC == 0x0074
+    assert r.REG_BATT_LOW_SOC == 0x0075
+
+
+def test_battery_threshold_block_is_polled():
+    # The three SOC thresholds must be inside one polled block.
+    for reg in (0x0073, 0x0074, 0x0075):
+        assert any(
+            start <= reg < start + count for start, count in r.CONTROL_BLOCKS
+        ), f"0x{reg:04X} not polled"
+
+
+@pytest.mark.parametrize("raw,label", [
+    (0, "Selling First"),
+    (1, "Zero Export to Load"),
+    (2, "Zero Export to CT"),
+])
+def test_work_mode_decode(raw, label):
+    assert r.decode({0x008E: [raw]})["work_mode"] == label
+
+
+def test_tou_charge_window_decode():
+    # 0x0095 start, 0x0096 end (HHMM), 0x00A7 target SOC %.
+    data = r.decode({0x0095: [1100, 1500], 0x00A7: [100]})
+    assert data["charge_start"] == "11:00"
+    assert data["charge_end"] == "15:00"
+    assert data["charge_soc"] == 100
+
+
+def test_tou_invalid_hhmm_is_omitted():
+    # An unset slot (0xFFFF) is not a valid HHMM -> key omitted, not fabricated.
+    data = r.decode({0x0095: [0xFFFF, 0xFFFF]})
+    assert "charge_start" not in data
+    assert "charge_end" not in data
+
+
+def test_discharge_soc_decode_from_widened_slot_block():
+    # Slot SOCs 0x00A6..0x00AB = [6, 100, 6, 6, 6, 6]: slot 2 (0x00A7) is the
+    # charge target (100), every non-charge slot is the discharge floor (6).
+    data = r.decode({0x00A6: [6, 100, 6, 6, 6, 6]})
+    assert data["discharge_soc"] == 6   # 0x00A6, representative non-charge slot
+    assert data["charge_soc"] == 100    # 0x00A7 still decodes from the same block
+
+
+def test_discharge_soc_regs_are_the_non_charge_slots():
+    # The five slots written as the discharge floor — slot 2 (charge) excluded.
+    assert r.DISCHARGE_SOC_REGS == [0x00A6, 0x00A8, 0x00A9, 0x00AA, 0x00AB]
+    assert r.REG_CHARGE_SOC not in r.DISCHARGE_SOC_REGS
+
+
+def test_grid_voltages_decode_from_real_0x0270_frame(poll):
+    # Phase volts at 0x0273/0x0274/0x0275 (÷10). Order is L1, L3, L2 — the L2
+    # register (0x0275) was the one cross-checked against the app.
+    assert poll["grid_voltage_l1"] == 241.9  # 0x0273 = 2419
+    assert poll["grid_voltage_l3"] == 236.3  # 0x0274 = 2363
+    assert poll["grid_voltage_l2"] == 237.1  # 0x0275 = 2371
+
+
+def test_grid_frequency_decode():
+    # 0x0261 ÷100 Hz.
+    assert r.decode({0x0261: [5000]})["grid_frequency"] == 50.0
+
+
+def test_bms_limits_decode():
+    # 0x00D2 block: charge V ÷100, discharge V ÷100, current limits 1:1 (A).
+    data = r.decode({0x00D2: [5700, 4690, 598, 1075]})
+    assert data["bms_charge_voltage"] == 57.0
+    assert data["bms_discharge_voltage"] == 46.9
+    assert data["bms_charge_current_limit"] == 598
+    assert data["bms_discharge_current_limit"] == 1075
+
+
+def test_work_mode_unknown_value():
+    assert r.decode({0x008E: [7]})["work_mode"] == "Unknown (7)"
+
+
+# --- Peak-shaving controls ---------------------------------------------------
+# All values confirmed by the live MITM capture 2026-07-09 (device SN 2507245326):
+# the opType-5 write frame set 0x00B2=0x2ABA, 0x00BE=0x1F40 (8000 W),
+# 0x00BF=0x4074 (16500 W), and the device readback ACK returned the same words.
+# 0x2AAA is the both-off baseline; grid enable is bit 4, gen enable is bit 2.
+
+def test_peak_shave_power_decode():
+    # 0x00BE gen power, 0x00BF grid power — raw watts, no scaling.
+    data = r.decode({0x00BE: [0x1F40, 0x4074]})  # 0x00BE..0x00BF
+    assert data["gen_peak_power"] == 8000
+    assert data["grid_peak_power"] == 16500
+    assert r.REG_GEN_PEAK_POWER == 0x00BE
+    assert r.REG_GRID_PEAK_POWER == 0x00BF
+
+
+@pytest.mark.parametrize("raw,grid_on,gen_on", [
+    (0x2AAA, False, False),  # baseline both off
+    (0x2ABA, True, False),   # grid enabled (bit 4)
+    (0x2AAE, False, True),   # gen enabled (bit 2)
+    (0x2ABE, True, True),    # grid + gen both enabled
+])
+def test_peak_shave_flags_decode(raw, grid_on, gen_on):
+    data = r.decode({0x00B2: [raw]})
+    assert data["grid_peak_shaving"] is grid_on
+    assert data["gen_peak_shaving"] is gen_on
+    # The raw word is published so the switch can read-modify-write safely.
+    assert data["peak_shaving_flags_raw"] == raw
+
+
+def test_peak_shave_masks_are_the_confirmed_bits():
+    assert r.GRID_PEAK_SHAVE_MASK == 0x0010  # bit 4
+    assert r.GEN_PEAK_SHAVE_MASK == 0x0004   # bit 2
+    assert r.REG_PEAK_SHAVING_FLAGS == 0x00B2
+
+
+def test_peak_shave_block_is_polled():
+    # Flags + both power regs must fall inside one polled control block.
+    for reg in (0x00B2, 0x00BE, 0x00BF):
+        assert any(
+            start <= reg < start + count for start, count in r.CONTROL_BLOCKS
+        ), f"0x{reg:04X} not polled"
+
+
+def test_set_flag_read_modify_write_preserves_other_bits():
+    # Enabling grid shaving on the baseline must only set bit 4 (0x2AAA -> 0x2ABA)
+    # and must not disturb the gen bit or any other function bit.
+    assert r.set_flag(0x2AAA, r.GRID_PEAK_SHAVE_MASK, True) == 0x2ABA
+    # Enabling gen on top of grid-on preserves the grid bit (0x2ABA -> 0x2ABE).
+    assert r.set_flag(0x2ABA, r.GEN_PEAK_SHAVE_MASK, True) == 0x2ABE
+    # Disabling grid from the both-on word clears only bit 4 (0x2ABE -> 0x2AAE).
+    assert r.set_flag(0x2ABE, r.GRID_PEAK_SHAVE_MASK, False) == 0x2AAE
+    # Setting an already-set bit / clearing an already-clear bit is a no-op.
+    assert r.set_flag(0x2ABA, r.GRID_PEAK_SHAVE_MASK, True) == 0x2ABA
+    assert r.set_flag(0x2AAA, r.GEN_PEAK_SHAVE_MASK, False) == 0x2AAA
+
+
+# --- Encoders / signedness ---------------------------------------------------
+
+def test_work_mode_roundtrip():
+    for raw, label in r.WORK_MODE_LABELS.items():
+        assert r.encode_work_mode(label) == raw
+
+
+def test_hhmm_roundtrip():
+    for raw in (0, 1100, 1400, 1500, 2359):
+        assert r.encode_hhmm(r.decode_hhmm(raw)) == raw
+
+
+def test_hhmm_encode_known_values():
+    assert r.encode_hhmm("14:00") == 1400
+    assert r.encode_hhmm("15:00") == 1500
+
+
+@pytest.mark.parametrize("bad", [
+    "24:00", "23:60", "-1:00", "1200", "12:00:00", "ab:cd",
+    "1:2", "01:2", "001:02",
+])
+def test_hhmm_encode_rejects_invalid(bad):
+    with pytest.raises(ValueError):
+        r.encode_hhmm(bad)
+
+
+def test_hhmm_decode_rejects_invalid():
+    with pytest.raises(ValueError):
+        r.decode_hhmm(2400)
+
+
+@pytest.mark.parametrize("raw,expected", [
+    (0x0000, 0),
+    (0x0001, 1),
+    (0x7FFF, 32767),
+    (0x8000, -32768),
+    (0xFFFF, -1),
+    (0xFED8, -296),
+])
+def test_signed16(raw, expected):
+    assert r._signed16(raw) == expected
+
+
+# --- Inverter real-time clock (0x003E-0x0040) -------------------------------
+# Anchored on the cloud write captured 2026-08-09 at the moment the app showed
+# "System Time 2026/08/09 08:56" (local-deye-cloud/docs/inverter-clock-2026-08-09.md).
+
+CLOCK_WORDS = [0x1A08, 0x0908, 0x3800]
+CLOCK_DATETIME = datetime(2026, 8, 9, 8, 56, 0)
+
+
+def clock_frame(words: list[int] = None) -> str:
+    """Build a valid CRC'd +ok= read response carrying the three clock words."""
+    words = CLOCK_WORDS if words is None else words
+    body = bytes([p.SLAVE, p.FUNC_READ, 2 * len(words)])
+    for w in words:
+        body += bytes(((w >> 8) & 0xFF, w & 0xFF))
+    return "+ok=" + (body + p.crc16(body)).hex().upper()
+
+
+def test_clock_decodes_captured_frame():
+    assert r.decode_clock(CLOCK_WORDS) == CLOCK_DATETIME
+
+
+def test_clock_encodes_to_captured_frame():
+    # Byte-for-byte against the captured cloud write — this is what catches a
+    # hi/lo swap if the register layout is ever re-derived.
+    assert r.encode_clock(CLOCK_DATETIME) == CLOCK_WORDS
+
+
+@pytest.mark.parametrize("value", [
+    datetime(2026, 8, 9, 8, 56, 0),
+    datetime(2026, 1, 1, 0, 0, 0),        # midnight, single-digit month + day
+    datetime(2026, 1, 5, 9, 7, 3),        # every field single-digit: hi/lo confusion shows
+    datetime(2026, 12, 31, 23, 59, 59),   # every field at its maximum
+])
+def test_clock_round_trip(value):
+    assert r.decode_clock(r.encode_clock(value)) == value
+
+
+@pytest.mark.parametrize("words,why", [
+    ([0x1A00, 0x0908, 0x3800], "month 0"),
+    ([0x1A0D, 0x0908, 0x3800], "month 13"),
+    ([0x1A08, 0x2008, 0x3800], "day 32"),
+    ([0x1A08, 0x0918, 0x3800], "hour 24"),
+    ([0x1A08, 0x0908, 0x3C00], "minute 60"),
+    ([0x1A08, 0x0908, 0x383C], "second 60"),
+    ([0x1A08, 0x0908], "short frame"),
+])
+def test_clock_decode_rejects_implausible(words, why):
+    # Undecoded beats quietly wrong: a bad frame yields nothing, not a guess.
+    assert r.decode_clock(words) is None, why
+
+
+def test_clock_encode_rejects_unrepresentable_year():
+    with pytest.raises(ValueError):
+        r.encode_clock(datetime(1999, 1, 1, 0, 0, 0))
+
+
+def test_clock_decodes_second_captured_frame():
+    # Independent second anchor: the app's "set 09:30" write, captured
+    # 2026-08-09. Confirms 0x0040 packs minute in the HIGH byte — two captures
+    # from different times agreeing is what pins the byte order.
+    assert r.decode_clock([0x1A08, 0x0909, 0x1E00]) == datetime(2026, 8, 9, 9, 30, 0)
+
+
+def test_decode_publishes_clock():
+    assert r.decode({0x003E: CLOCK_WORDS})["inverter_clock"] == CLOCK_DATETIME
+
+
+def test_decode_omits_clock_when_block_absent(poll):
+    # Telemetry-only poll: no clock block read, so no key at all.
+    assert "inverter_clock" not in poll
+
+
+def test_decode_omits_implausible_clock():
+    assert "inverter_clock" not in r.decode({0x003E: [0x1A0D, 0x0908, 0x3800]})
+
+
+# --- Time Sync flag (0x00E4 bit 0) ------------------------------------------
+# Live values: 0x0AEA = sync off, 0x0AEB = sync on. Only the low byte is ever
+# written by the app; the high byte carries unrelated System Time panel bits
+# (AM/PM, Auto Dim, Beep, Factory Reset), so every change must be a
+# read-modify-write. See local-deye-cloud/docs/inverter-clock-2026-08-09.md.
+
+def test_time_sync_mask_is_bit0():
+    assert r.TIME_SYNC_MASK == 0x0001
+
+
+def test_time_sync_enable_preserves_the_other_panel_bits():
+    assert r.set_flag(0x0AEA, r.TIME_SYNC_MASK, True) == 0x0AEB
+
+
+def test_time_sync_disable_preserves_the_other_panel_bits():
+    assert r.set_flag(0x0AEB, r.TIME_SYNC_MASK, False) == 0x0AEA
+
+
+@pytest.mark.parametrize("raw,expected", [(0x0AEB, True), (0x0AEA, False)])
+def test_decode_publishes_time_sync(raw, expected):
+    # Time Sync off means the logger's cloud calibration cannot reach the RTC —
+    # the silent failure this entity exists to make visible.
+    assert r.decode({r.REG_TIME_SYNC: [raw]})["time_sync"] is expected
+
+
+def test_decode_omits_time_sync_when_block_absent(poll):
+    assert "time_sync" not in poll
