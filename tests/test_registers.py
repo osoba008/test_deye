@@ -19,6 +19,14 @@ from custom_components.deye_ble import registers as r
 
 # --- Captured frames (block_start -> raw +ok= response) ---------------------
 
+def _read_frame(words: list[int]) -> str:
+    """Build a CRC'd read response for synthetic register-map test words."""
+    body = bytes((p.SLAVE, p.FUNC_READ, 2 * len(words)))
+    for word in words:
+        body += bytes(((word >> 8) & 0xFF, word & 0xFF))
+    return "+ok=" + (body + p.crc16(body)).hex().upper()
+
+
 FRAMES: dict[int, str] = {
     0x00D2: "+ok=01030816441252025604330936",  # BMS: chg V 57.00, dis V 46.90, limits 598/1075
     0x0202: "+ok=01031C00040068349B000031A70000000000043BEC000010B00000006C2DC084C7",
@@ -28,6 +36,8 @@ FRAMES: dict[int, str] = {
     0x0270: "+ok=0103200130FFD600000973093B094300A000A000BE01B201A701EE0547054713830000E9C0",
     0x0280: "+ok=010320015800A7031E051D097609400942000000000000015800A7031E051D051D1383E5C8",
     0x02A0: "+ok=01032006F70000000000000A330044001F00000000000000000000000000000000FFFFA4B0",
+    0x0265: _read_frame([1234, 0xFFFF, 0x8000, 0xE240, 0xF416, 0xFFFF]),
+    0x02C1: _read_frame([1, 0xFFFF, 0xFFFF]),
 }
 
 
@@ -72,6 +82,29 @@ def test_grid_power_signed_block_0x0256(poll):
     assert poll["grid_power"] == -42  # 0xFFD6 signed, register 0x025F
 
 
+def test_external_ct_currents_decode_signed_and_scaled(poll):
+    assert poll["external_ct_current_l1"] == 12.34
+    assert poll["external_ct_current_l2"] == -0.01
+    assert poll["external_ct_current_l3"] == -327.68
+
+
+def test_external_ct_powers_decode_signed_32_bit_low_word_first(poll):
+    assert poll["external_ct_power_l1"] == 123456
+    assert poll["external_ct_power_l2"] == -3050
+    assert poll["external_ct_power_l3"] == -1
+
+
+@pytest.mark.parametrize(
+    "words_by_reg",
+    [
+        {0x0268: [0xE240]},
+        {0x02C1: [1]},
+    ],
+)
+def test_external_ct_power_omitted_when_either_word_is_missing(words_by_reg):
+    assert "external_ct_power_l1" not in r.decode(words_by_reg)
+
+
 def test_inverter_phases_block_0x0270(poll):
     assert poll["inverter_power_l1"] == 434
     assert poll["inverter_power_l2"] == 423
@@ -111,6 +144,8 @@ def test_pv1_pv2_registers_block_0x02A0(poll):
 # separate 23rd integration value, decoded below as an enum label.
 EXPECTED_KEYS = {
     "solar_power", "house_load", "grid_power", "battery_power", "ups_power",
+    "external_ct_current_l1", "external_ct_current_l2", "external_ct_current_l3",
+    "external_ct_power_l1", "external_ct_power_l2", "external_ct_power_l3",
     "battery_soc", "battery_voltage", "battery_temp", "inverter_temp",
     "daily_solar", "total_solar", "total_grid_import", "total_grid_export",
     "total_battery_charge", "total_battery_discharge", "max_sell_power",

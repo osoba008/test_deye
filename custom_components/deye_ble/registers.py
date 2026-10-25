@@ -31,9 +31,11 @@ READ_BLOCKS: list[tuple[int, int]] = [
     (0x0210, 14),  # 0x0210..0x021D — daily/total solar + temperatures
     (0x024A, 6),   # 0x024A..0x024F — battery temp/voltage/soc/power
     (0x0256, 12),  # 0x0256..0x0261 — grid power (0x025F) + grid frequency (0x0261)
+    (0x0265, 6),   # 0x0265..0x026A — external CT currents + low power words
     (0x0270, 16),  # 0x0270..0x027F — inverter output L1-3 + grid voltages 0x0273-0x0275
     (0x0280, 16),  # 0x0280..0x028F — house load / UPS load
     (0x02A0, 16),  # 0x02A0..0x02AF — PV1/PV2 power, voltage, and current
+    (0x02C1, 3),   # 0x02C1..0x02C3 — external CT power high words
 ]
 
 # Control registers, read on the slower config cycle (P3).
@@ -145,6 +147,9 @@ _DECODE_MAP: dict[str, tuple[int, float, bool, int]] = {
     "inverter_power_l1":       (0x0279, 1,    True,  0),
     "inverter_power_l2":       (0x027A, 1,    True,  0),
     "inverter_power_l3":       (0x027B, 1,    True,  0),
+    "external_ct_current_l1":  (0x0265, 0.01, True, 0),  # A
+    "external_ct_current_l2":  (0x0266, 0.01, True, 0),  # A
+    "external_ct_current_l3":  (0x0267, 0.01, True, 0),  # A
 
     # Battery
     "battery_soc":             (0x024C, 1,    False, 0),     # %
@@ -208,6 +213,11 @@ def _signed16(raw: int) -> int:
     return raw if raw < 0x8000 else raw - 0x10000
 
 
+def _signed32(raw: int) -> int:
+    """Interpret a 32-bit unsigned value as signed (two's complement)."""
+    return raw if raw < 0x80000000 else raw - 0x100000000
+
+
 def _lookup(words_by_reg: dict[int, list[int]], reg: int) -> int | None:
     """Return the raw word at absolute register *reg*, or None if not polled."""
     for block_start, words in words_by_reg.items():
@@ -234,6 +244,16 @@ def decode(words_by_reg: dict[int, list[int]]) -> dict[str, float | int | str | 
         value = _signed16(raw) if signed else raw
         value = (value - offset) * scale
         result[key] = int(value) if (scale == 1 and offset == 0) else round(value, 2)
+
+    for phase, low_reg, high_reg in (
+        ("l1", 0x0268, 0x02C1),
+        ("l2", 0x0269, 0x02C2),
+        ("l3", 0x026A, 0x02C3),
+    ):
+        low = _lookup(words_by_reg, low_reg)
+        high = _lookup(words_by_reg, high_reg)
+        if low is not None and high is not None:
+            result[f"external_ct_power_{phase}"] = _signed32((high << 16) | low)
 
     work_mode_raw = _lookup(words_by_reg, REG_WORK_MODE)
     if work_mode_raw is not None:

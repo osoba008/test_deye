@@ -86,6 +86,16 @@ Exact per-register decode (scaling, signedness) to be finalised in build phase P
 against captured `+ok=` responses and the existing
 [`modbus-decode.md`](https://github.com/PetePeter/local-deye-cloud/blob/master/docs/modbus-decode.md).
 
+## External CT telemetry
+
+For SG0*LP3 and SG0*HP3 models, the external CT register map is confirmed by
+the `davidrapan/ha-solarman` `deye_p3.yaml` definition and a
+SUN-12K-SG05LP3-EU-SM2 register dump. Current registers `0x0265`–`0x0267`
+decode as signed 16-bit values scaled by 0.01 A. Per-phase power combines
+signed 32-bit words: low words are at `0x0268`–`0x026A`, with high words at
+`0x02C1`–`0x02C3`. A phase power is omitted unless both words are available.
+These are external CT sensors; internal CT currents are not included.
+
 ## Cloud cross-reference (from MITM)
 
 Cloud control writes arrive on `user/down/control/order` as Deye opType-4 (read
