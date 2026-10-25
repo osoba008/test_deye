@@ -65,8 +65,9 @@ Charge window = slot 2: start `0x0095`, end (= slot 3 start) `0x0096`, grid-char
 
 The app handshakes once, then reads these 18 blocks each poll. Map to integration
 sensors per [`ha-deyecloud-bridge`](https://github.com/PetePeter/ha-deyecloud-bridge)
-keys (solar_power, house_load, grid_power, battery_power/soc/voltage/temp,
-inverter_temp, daily/total energy, inverter L1-3 power, max_sell_power).
+keys (solar_power, PV1/PV2 string power/voltage/current, house_load, grid_power,
+battery_power/soc/voltage/temp, inverter_temp, daily/total energy, inverter
+L1-3 power, max_sell_power).
 
 | Reg | Count | Reg | Count | Reg | Count |
 |-----|-------|-----|-------|-----|-------|
@@ -81,6 +82,39 @@ inverter_temp, daily/total energy, inverter L1-3 power, max_sell_power).
 Exact per-register decode (scaling, signedness) to be finalised in build phase P2
 against captured `+ok=` responses and the existing
 [`modbus-decode.md`](https://github.com/PetePeter/local-deye-cloud/blob/master/docs/modbus-decode.md).
+
+## PV string telemetry
+
+The `0x02A0` block supplies per-string PV power and operating points. `solar_power`
+is retained as the existing overall solar power entity, and `pv1_power` exposes
+the PV1 register under its per-string identity as well.
+
+| Sensor | Register | Decode |
+|--------|----------|--------|
+| `pv1_power` | `0x02A0` | W, 1:1 |
+| `pv2_power` | `0x02A1` | W, 1:1 |
+| `pv1_voltage` | `0x02A4` | V, ×0.1 |
+| `pv1_current` | `0x02A5` | A, ×0.1 |
+| `pv2_voltage` | `0x02A6` | V, ×0.1 |
+| `pv2_current` | `0x02A7` | A, ×0.1 |
+
+## External CT telemetry
+
+For SG0*LP3 and SG0*HP3 models, the external CT mapping is confirmed by
+`davidrapan/ha-solarman`'s `deye_p3.yaml` inverter definition and the
+SUN-12K-SG05LP3-EU-SM2 register dump. The integration polls `0x0265` for six
+words and `0x02C1` for three words:
+
+| Phase | Current register | Current decode | Power low word | Power high word | Power decode |
+|-------|------------------|----------------|----------------|-----------------|--------------|
+| L1 | `0x0265` | signed 16-bit × 0.01 A | `0x0268` | `0x02C1` | signed 32-bit W |
+| L2 | `0x0266` | signed 16-bit × 0.01 A | `0x0269` | `0x02C2` | signed 32-bit W |
+| L3 | `0x0267` | signed 16-bit × 0.01 A | `0x026A` | `0x02C3` | signed 32-bit W |
+
+The power words are combined with the high word in the upper 16 bits and the
+low word in the lower 16 bits. A phase's power is omitted unless both words
+were read. These registers report external CT sensors only; internal CT
+currents are not included.
 
 ## Cloud cross-reference (from MITM)
 

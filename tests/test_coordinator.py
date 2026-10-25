@@ -62,8 +62,18 @@ async def test_async_poll_returns_all_telemetry_keys():
 
     # Must have all telemetry keys from a full READ_BLOCKS poll
     assert "solar_power" in data
+    assert data["pv1_power"] == data["solar_power"]
+    assert "pv2_power" in data
+    assert "pv2_voltage" in data
+    assert "pv2_current" in data
     assert "battery_soc" in data
     assert "grid_power" in data
+    assert data["external_ct_current_l1"] == 12.34
+    assert data["external_ct_current_l2"] == -0.01
+    assert data["external_ct_current_l3"] == -327.68
+    assert data["external_ct_power_l1"] == 123456
+    assert data["external_ct_power_l2"] == -3050
+    assert data["external_ct_power_l3"] == -1
     assert "house_load" in data
     assert "battery_power" in data
     assert "inverter_power_l1" in data
@@ -124,6 +134,8 @@ async def test_async_poll_reads_all_blocks():
     starts = [addr for addr, _ in transport.reads]
     for block_start, _ in r.READ_BLOCKS:
         assert block_start in starts
+    assert (0x0265, 6) in transport.reads
+    assert (0x02C1, 3) in transport.reads
 
 
 @pytest.mark.asyncio

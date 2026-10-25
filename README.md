@@ -134,17 +134,29 @@ flowchart TD
 
 ## Entities
 
-### Sensors (29 + 1 derived)
+### Sensors
 
 | Key | Name | Unit | Source register |
 |-----|------|------|-----------------|
 | `solar_power` | Solar Power | W | `0x02A0` |
+| `pv1_power` | PV1 Power | W | `0x02A0` |
+| `pv2_power` | PV2 Power | W | `0x02A1` |
 | `house_load` | House Load | W | `0x0283` |
 | `grid_power` | Grid Power | W | `0x025F` |
+| `external_ct_current_l1` | External CT Current L1 | A | `0x0265` |
+| `external_ct_current_l2` | External CT Current L2 | A | `0x0266` |
+| `external_ct_current_l3` | External CT Current L3 | A | `0x0267` |
+| `external_ct_power_l1` | External CT Power L1 | W | `0x0268` + `0x02C1` |
+| `external_ct_power_l2` | External CT Power L2 | W | `0x0269` + `0x02C2` |
+| `external_ct_power_l3` | External CT Power L3 | W | `0x026A` + `0x02C3` |
 | `battery_power` | Battery Power | W | `0x024E` |
 | `ups_power` | UPS Power | W | `0x028D` |
 | `battery_soc` | Battery SOC | % | `0x024C` |
 | `battery_voltage` | Battery Voltage | V | `0x024B` |
+| `pv1_voltage` | PV1 Voltage | V | `0x02A4` |
+| `pv1_current` | PV1 Current | A | `0x02A5` |
+| `pv2_voltage` | PV2 Voltage | V | `0x02A6` |
+| `pv2_current` | PV2 Current | A | `0x02A7` |
 | `battery_temp` | Battery Temperature | °C | `0x024A` |
 | `inverter_temp` | Inverter Temperature | °C | `0x021D` |
 | `daily_solar` | Solar Today | kWh | `0x0211` |
@@ -175,6 +187,11 @@ flowchart TD
 
 > Grid voltage phase order is L1, L3, L2 across `0x0273`–`0x0275`; only L2
 > (`0x0275`) was directly cross-checked against the app.
+>
+> External CT current values are signed and scaled by 0.01 A. External CT power
+> values are signed 32-bit values with the low word at `0x0268`–`0x026A` and
+> the corresponding high word at `0x02C1`–`0x02C3`. These are external CT
+> sensors; internal CT currents are not exposed.
 
 ### Binary sensors
 
