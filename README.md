@@ -143,6 +143,12 @@ flowchart TD
 | `pv2_power` | PV2 Power | W | `0x02A1` |
 | `house_load` | House Load | W | `0x0283` |
 | `grid_power` | Grid Power | W | `0x025F` |
+| `external_ct_current_l1` | External CT Current L1 | A | `0x0265` |
+| `external_ct_current_l2` | External CT Current L2 | A | `0x0266` |
+| `external_ct_current_l3` | External CT Current L3 | A | `0x0267` |
+| `external_ct_power_l1` | External CT Power L1 | W | `0x0268` + `0x02C1` |
+| `external_ct_power_l2` | External CT Power L2 | W | `0x0269` + `0x02C2` |
+| `external_ct_power_l3` | External CT Power L3 | W | `0x026A` + `0x02C3` |
 | `battery_power` | Battery Power | W | `0x024E` |
 | `ups_power` | UPS Power | W | `0x028D` |
 | `battery_soc` | Battery SOC | % | `0x024C` |
@@ -178,6 +184,9 @@ flowchart TD
 | `clock_sync_result` | Clock Sync Result | — | last `sync_clock` outcome — `ok` / `skipped` / `failed` / `clock_wrong`, with `sync_id`/`sync_attempts`/`sync_at` |
 | `inverter_clock_drift` | Inverter Clock Drift | s | derived — snapshot taken at each clock read |
 | `inverter_time_of_day_drift` | Inverter Clock Drift (Time of Day) | s | derived — date ignored, wrapped to ±12 h |
+
+External CT currents are signed 16-bit values scaled by 0.01 A. External CT
+powers are signed 32-bit values; internal CT currents are not exposed.
 
 > Grid voltage phase order is L1, L3, L2 across `0x0273`–`0x0275`; only L2
 > (`0x0275`) was directly cross-checked against the app.
